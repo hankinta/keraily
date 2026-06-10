@@ -394,7 +394,10 @@
   <div id="scanner-qr-box"></div>
   <div class="scanner-ui" style="pointer-events:none">
     <div class="scanner-label" id="scanner-label-text" style="margin-top:0;position:absolute;top:20px;left:0;right:0;text-align:center">Skannaa viivakoodi</div>
-    <div class="scanner-hint" style="position:absolute;bottom:100px;left:0;right:0;text-align:center">Pidä koodi kameran edessä</div>
+    <!-- Tähtäysviiva 1D-viivakoodille -->
+    <div style="position:absolute;top:50%;left:10%;right:10%;height:2px;background:rgba(245,166,35,0.8);box-shadow:0 0 8px rgba(245,166,35,0.8);transform:translateY(-50%);"></div>
+    <div style="position:absolute;top:50%;left:10%;right:10%;height:80px;border:2px solid rgba(245,166,35,0.5);transform:translateY(-50%);border-radius:4px;"></div>
+    <div class="scanner-hint" style="position:absolute;bottom:100px;left:0;right:0;text-align:center">Pidä viivakoodi vaakasuoraan kehyksen sisällä</div>
   </div>
   <button id="scanner-close" onclick="closeScanner()">✕</button>
   <button id="scanner-manual" onclick="manualInput()">Kirjoita käsin</button>
@@ -572,15 +575,8 @@ function startCamera() {
   Quagga.onDetected(function(result) {
     const code = result.codeResult.code;
     if (!code) return;
-    // Varmistus: sama koodi kahdesti peräkkäin (vähentää vääriä lukemia)
-    if (!startCamera._lastCode) startCamera._lastCode = '';
-    if (startCamera._lastCode === code) {
-      startCamera._lastCode = '';
-      closeScanner();
-      handleScan(code);
-    } else {
-      startCamera._lastCode = code;
-    }
+    closeScanner();
+    handleScan(code);
   });
 }
 
