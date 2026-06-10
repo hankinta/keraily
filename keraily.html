@@ -418,9 +418,56 @@ const DB = {
   getProducts: () => DB.get('products') || {},
   getShelves: () => DB.get('shelves') || {},
   getPickList: () => DB.get('picklist') || [],
+  // codeIndex: { tuotekoodi_uppercase -> ean } — nopea haku tuotekoodilla
+  getCodeIndex: () => DB.get('codeindex') || {},
   saveProducts: v => DB.set('products', v),
   saveShelves: v => DB.set('shelves', v),
   savePickList: v => DB.set('picklist', v),
+  saveCodeIndex: v => DB.set('codeindex', v),
+  // Hae tuote joko EAN:lla tai tuotekoodilla — palauttaa { ean, product } tai null
+  findProduct(query) {
+    const q = query.trim();
+    const products = DB.getProducts();
+    // 1. Suora EAN-osuma
+    if (products[q]) return { ean: q, product: products[q] };
+    // 2. Tuotekoodi-indeksi
+    const idx = DB.getCodeIndex();
+    const ean = idx[q.toUpperCase()];
+    if (ean && products[ean]) return { ean, product: products[ean] };
+    // 3. Brute-force fallback (kattaa vanhat tietueet ilman indeksiä)
+    const found = Object.values(products).find(p =>
+      p.code && p.code.toUpperCase() === q.toUpperCase()
+    );
+    if (found) return { ean: found.ean, product: found };
+    return null;
+  },
+  // Tallenna tuote ja päivitä koodi-indeksi
+  saveProduct(ean, product) {
+    const products = DB.getProducts();
+    // Poista vanhan koodin indeksiviite jos koodi muuttui
+    const old = products[ean];
+    const idx = DB.getCodeIndex();
+    if (old && old.code) delete idx[old.code.toUpperCase()];
+    products[ean] = product;
+    if (product.code) idx[product.code.toUpperCase()] = ean;
+    DB.saveProducts(products);
+    DB.saveCodeIndex(idx);
+  },
+  // Poista tuote ja sen indeksiviite
+  deleteProduct(ean) {
+    const products = DB.getProducts();
+    const p = products[ean];
+    if (p && p.code) {
+      const idx = DB.getCodeIndex();
+      delete idx[p.code.toUpperCase()];
+      DB.saveCodeIndex(idx);
+    }
+    delete products[ean];
+    const shelves = DB.getShelves();
+    delete shelves[ean];
+    DB.saveProducts(products);
+    DB.saveShelves(shelves);
+  },
 };
 
 // ─── HELPERS ──────────────────────────────────────────────────────────────────
@@ -558,47 +605,62 @@ function handleScan(val) {
 function searchProduct() {
   const raw = document.getElementById('hyl-ean').value.trim();
   if (!raw) { toast('Syötä EAN tai tuotekoodi', 'err'); return; }
-  const products = DB.getProducts();
+
   const shelves = DB.getShelves();
-  const ean = raw;
-
-  // Find or create product
-  let product = products[ean];
-
   const resultDiv = document.getElementById('hyl-product-result');
   const formDiv = document.getElementById('hyl-form');
 
-  if (!product) {
-    // Unknown product — ask for name
+  const found = DB.findProduct(raw);
+
+  if (!found) {
+    // Tuntematon — näytetään rekisteröintilomake
+    // Syöte voi olla EAN (numerot) tai tuotekoodi (kirjaimia) — yritetään päätellä
+    const looksLikeEAN = /^\d{8,14}$/.test(raw);
     resultDiv.innerHTML = `
       <div class="card" style="border-color:var(--yellow)">
         <div class="card-title" style="color:var(--yellow)">⚠ Tuntematon nimike</div>
         <p style="font-size:13px;color:var(--muted);margin-bottom:12px">
-          EAN <code style="color:var(--accent)">${ean}</code> ei löydy rekisteristä. Lisää nimikkeen tiedot:
+          Koodi <code style="color:var(--accent)">${raw}</code> ei löydy rekisteristä. Lisää nimikkeen tiedot:
         </p>
-        <label>Tuotekoodi (valinnainen)</label>
-        <input type="text" id="new-code" placeholder="esim. TCK-X" style="margin-bottom:8px" autocomplete="off">
+        <label>EAN-viivakoodi</label>
+        <div class="scan-row" style="margin-bottom:8px">
+          <input type="text" id="new-ean" placeholder="esim. 6234567890123"
+            value="${looksLikeEAN ? raw : ''}" autocomplete="off">
+          <button class="btn-scan" onclick="openScanner('new-ean','Skannaa EAN tuotteesta')">⊡</button>
+        </div>
+        <label>Tuotekoodi (Lemonsoft)</label>
+        <input type="text" id="new-code" placeholder="esim. 531526"
+          value="${!looksLikeEAN ? raw : ''}" style="margin-bottom:8px;text-transform:uppercase" autocomplete="off">
         <label>Tuotteen nimi</label>
-        <input type="text" id="new-name" placeholder="esim. Kyocera TCK-X terä" style="margin-bottom:12px" autocomplete="off">
-        <button class="btn btn-primary" onclick="registerNewProduct('${ean}')">Rekisteröi nimike</button>
+        <input type="text" id="new-name" placeholder="esim. imuturbiini VCE26 H MC" style="margin-bottom:12px" autocomplete="off">
+        <button class="btn btn-primary" onclick="registerNewProduct()">Rekisteröi nimike</button>
       </div>`;
     resultDiv.style.display = '';
     formDiv.style.display = 'none';
     return;
   }
 
-  showProductResult(ean, product, shelves);
+  // Päivitä kentän arvo EAN:ksi jotta saveShelfEntry toimii oikein
+  document.getElementById('hyl-ean').value = found.ean;
+  showProductResult(found.ean, found.product, shelves);
 }
 
-function registerNewProduct(ean) {
+function registerNewProduct() {
+  const ean  = document.getElementById('new-ean').value.trim();
+  const code = document.getElementById('new-code').value.trim().toUpperCase();
   const name = document.getElementById('new-name').value.trim();
-  const code = document.getElementById('new-code').value.trim();
+  if (!ean)  { toast('Syötä EAN-viivakoodi', 'err'); return; }
   if (!name) { toast('Anna tuotteen nimi', 'err'); return; }
-  const products = DB.getProducts();
-  products[ean] = { ean, code, name };
-  DB.saveProducts(products);
+  // Tarkista että EAN ei ole jo käytössä toisella nimikkeellä
+  const existing = DB.findProduct(ean);
+  if (existing && existing.ean !== ean) {
+    toast('EAN on jo käytössä toisella nimikkeellä', 'err'); return;
+  }
+  const product = { ean, code, name };
+  DB.saveProduct(ean, product);
+  document.getElementById('hyl-ean').value = ean;
   const shelves = DB.getShelves();
-  showProductResult(ean, products[ean], shelves);
+  showProductResult(ean, product, shelves);
   toast('Nimike rekisteröity', 'ok');
 }
 
@@ -621,10 +683,15 @@ function showProductResult(ean, product, shelves) {
           </div>
         </div>`).join('');
 
+  const codeLine = [
+    product.code ? `<span style="color:var(--accent)">Koodi: ${product.code}</span>` : '',
+    ean ? `EAN: ${ean}` : '',
+  ].filter(Boolean).join(' &nbsp;·&nbsp; ');
+
   document.getElementById('hyl-product-result').innerHTML = `
     <div class="product-card">
       <div class="product-name">${product.name}</div>
-      <div class="product-code">${product.code ? product.code + ' · ' : ''}EAN: ${ean}</div>
+      <div class="product-code">${codeLine}</div>
       <div class="total-badge">
         ${total} <span>kpl yhteensä</span>
       </div>
@@ -707,13 +774,14 @@ function clearPickList() {
 }
 
 function addPickRow() {
-  const ean = document.getElementById('pick-ean').value.trim();
+  const raw = document.getElementById('pick-ean').value.trim();
   const needed = parseInt(document.getElementById('pick-need-qty').value) || 1;
-  if (!ean) { toast('Skannaa tai syötä EAN', 'err'); return; }
+  if (!raw) { toast('Skannaa tai syötä koodi', 'err'); return; }
 
-  const products = DB.getProducts();
   const shelves = DB.getShelves();
-  const product = products[ean];
+  const found = DB.findProduct(raw);
+  const ean = found ? found.ean : raw;
+  const product = found ? found.product : null;
   const shelfData = shelves[ean] || {};
 
   // Build shelf allocation (largest first)
@@ -728,8 +796,8 @@ function addPickRow() {
   const list = DB.getPickList();
   list.push({
     ean,
-    name: product ? product.name : `Tuntematon (${ean})`,
-    code: product ? product.code : '',
+    name: product ? product.name : `Tuntematon (${raw})`,
+    code: product ? product.code : raw,
     needed,
     shelves: alloc,
     done: false,
@@ -742,10 +810,12 @@ function addPickRow() {
   renderPickRows();
   updateBadge();
 
-  if (remaining > 0) {
+  if (!product) {
+    toast('⚠ Nimike tuntematon — lisää Hyllytys-välilehdellä', 'err');
+  } else if (remaining > 0) {
     toast(`⚠ Saldo vajaa — puuttuu ${remaining} kpl`, 'err');
   } else if (alloc.length === 0) {
-    toast('Hyllypaikat tuntematon — tarkista Hyllytys', '');
+    toast('Hyllypaikka puuttuu — aseta Hyllytys-välilehdellä', '');
   } else {
     toast('Rivi lisätty', 'ok');
   }
@@ -757,7 +827,7 @@ function renderPickRows() {
   if (!container) return;
 
   if (list.length === 0) {
-    container.innerHTML = `<div class="empty"><div class="empty-icon">📋</div><p>Ei rivejä.<br>Skannaa EAN lähetteeltä.</p></div>`;
+    container.innerHTML = `<div class="empty"><div class="empty-icon">📋</div><p>Ei rivejä.<br>Skannaa tuotekoodi tai EAN lähetteeltä.</p></div>`;
     document.getElementById('pick-confirm-area').style.display = 'none';
     return;
   }
@@ -866,16 +936,16 @@ function checkConfirmShelf() {
 
   // Step 2 — scan product
   currentConfirmStep = 'product';
+  const codeHint = row.code ? ` tai tuotekoodi <strong style="color:var(--accent)">${row.code}</strong>` : '';
   inner.innerHTML = `
     <div class="confirm-box">
       <div class="step">Vaihe 2/2 — Vahvista tuote</div>
       <p style="font-size:13px;color:var(--muted);margin-bottom:10px">
-        Skannaa tuotteen EAN-viivakoodi.<br>
-        Odotetaan: <strong style="color:var(--accent)">${row.ean}</strong>
+        Skannaa tuotteen EAN${codeHint}.
       </p>
       <div class="scan-row">
         <input type="text" id="confirm-product-input" placeholder="${row.ean}" autocomplete="off">
-        <button class="btn-scan" onclick="openScanner('confirm-product', 'Skannaa tuotteen EAN')">⊡</button>
+        <button class="btn-scan" onclick="openScanner('confirm-product', 'Skannaa tuotteen EAN tai koodi')">⊡</button>
       </div>
       <div style="margin-top:8px">
         <button class="btn btn-primary" onclick="checkConfirmProduct()">Vahvista →</button>
@@ -889,9 +959,16 @@ function checkConfirmProduct() {
   const input = document.getElementById('confirm-product-input').value.trim();
   const inner = document.getElementById('pick-confirm-inner');
 
-  if (input !== row.ean) {
+  // Hyväksy sekä EAN että tuotekoodi
+  const found = DB.findProduct(input);
+  const matchesEAN = input === row.ean;
+  const matchesCode = found && found.ean === row.ean;
+
+  if (!matchesEAN && !matchesCode) {
+    // Poista aiemmat virheilmoitukset ensin
+    inner.querySelectorAll('.confirm-result.err').forEach(e => e.remove());
     inner.querySelector('.confirm-box').insertAdjacentHTML('beforeend',
-      `<div class="confirm-result err">❌ Väärä tuote — tarkista EAN</div>`);
+      `<div class="confirm-result err">❌ Väärä tuote — tarkista koodi</div>`);
     return;
   }
 
@@ -991,11 +1068,7 @@ function deleteProduct(ean) {
   const products = DB.getProducts();
   const name = products[ean]?.name || ean;
   if (!confirm(`Poista "${name}" rekisteristä?\nHyllytiedot poistetaan myös.`)) return;
-  delete products[ean];
-  const shelves = DB.getShelves();
-  delete shelves[ean];
-  DB.saveProducts(products);
-  DB.saveShelves(shelves);
+  DB.deleteProduct(ean);
   renderRegistry();
   toast('Nimike poistettu', 'ok');
 }
@@ -1034,12 +1107,16 @@ function importCSV(event) {
     if (lines.length < 2) { toast('CSV tyhjä tai virheellinen', 'err'); return; }
     const products = DB.getProducts();
     const shelves = DB.getShelves();
+    const idx = DB.getCodeIndex();
     let count = 0;
     lines.slice(1).forEach(line => {
       const cols = line.split(',').map(c => c.replace(/^"|"$/g,'').replace(/""/g,'"').trim());
       const [ean, code, name, shelf, qty] = cols;
       if (!ean) return;
-      if (name) products[ean] = { ean, code: code||'', name };
+      if (name) {
+        products[ean] = { ean, code: code||'', name };
+        if (code) idx[code.toUpperCase()] = ean;
+      }
       if (shelf && qty !== '') {
         if (!shelves[ean]) shelves[ean] = {};
         shelves[ean][shelf] = parseInt(qty) || 0;
@@ -1048,6 +1125,7 @@ function importCSV(event) {
     });
     DB.saveProducts(products);
     DB.saveShelves(shelves);
+    DB.saveCodeIndex(idx);
     renderRegistry();
     toast(`${count} riviä tuotu`, 'ok');
   };
